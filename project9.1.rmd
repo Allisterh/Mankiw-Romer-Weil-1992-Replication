@@ -1,0 +1,473 @@
+---
+title: "Evaluating the Solow Growth Model using the MRW Framework"
+author: "Matthew Houser"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r, include=FALSE}
+#Import packages and data
+#install.packages("systemfit")
+#install.packages("kableExtra")
+#install.packages("DT")
+library(xtable)
+library(kableExtra)
+library(DT)
+library(gridExtra)
+library(AER)
+library(systemfit)
+library(knitr)
+library(lmtest)
+library(readxl)
+library(lmtest)
+library(tidyverse)
+library(dplyr)
+library(pastecs)
+mrw <- read_csv("mrw.csv")
+pwt <- read_excel("pwt91.xlsx", sheet = "Data")
+UNdata <- read_csv("UNdata_Export_20190423_172145263/UNdata_Export_20190423_172145263.csv")
+WDIData <- read_csv("WDI_csv/WDIData.csv")
+```
+
+
+```{r, echo=FALSE}
+#Select only countries used in regression
+mrw %>% 
+  filter(n==1) -> mrw
+#Create list of countries
+#mrw csv has a typo in the Congo entry
+mrw[10, 2] = "Congo"
+countries <- mrw[2]
+countries <- unlist(countries)
+
+#Find discrepancsh_ies in naming between datasets, uncomment to view
+#setdiff(countries, unlist(WDIData[1]))
+
+#Manually find missing countries and add them to main dataset
+#Create dataset of countries to make it easier to search through
+test <- unique(WDIData[1])
+missingcountries <- c("Central African Republic", "Congo, Rep.", "Egypt, Arab Rep.", "Cote d'Ivoire", "South Africa",  "Congo, Dem. Rep.", "Myanmar", "Hong Kong SAR, China", "Korea, Rep.", "Syrian Arab Republic", "Germany", "Dominican Republic", "Venezuela, RB")
+
+#Add missingcountries to countries
+countries <- union(countries, missingcountries)
+#Subset WDIdata to only countries in MRW
+MRW_WDIData <- WDIData[WDIData$`Country Name` %in% countries,]
+
+#Extract fraction of working age population from population
+names(MRW_WDIData)[names(MRW_WDIData) == "Indicator Name"] <- c("Indicator")
+MRW_WDIData %>% 
+  filter(Indicator ==  "Population ages 15-64 (% of total)") %>% 
+  select(c("Country Name", "Country Code", "1960", "1985", "2010"))-> data
+
+names(data) <- c("Country", "countrycode", "1960WAP", "1985WAP", "2010WAP")
+
+#Obtain Secondary school gross enrollment data
+MRW_WDIData %>% 
+  filter(Indicator == "School enrollment, secondary (% gross)") %>% 
+  select("Country Name", 27:33, 52:58) %>% 
+  mutate(school85 = coalesce(`1985`, `1984`, `1986`, `1983`, `1987`, `1982`, `1988`)) %>% 
+  mutate(school10 = coalesce(`2010`, `2009`, `2011`, `2008`, `2012`, `2007`, `2013`)) %>% 
+  select("Country Name", "school85", "school10") -> edu
+
+names(edu) <- c("Country", "GrossEnrollment85", "GrossEnrollment10")
+
+#Merge full data with working age population data
+data <- left_join(data, edu, by = "Country")
+
+
+#Subset PWT data to countries in MRW
+countrycodes <- data[2]
+#PWT has countrycode for Germany as DEU, while elsewhere it is GER
+countrycodes <- unlist(countrycodes)
+#Collect PWT data for select years
+pwt%>% 
+  filter(year == c("1960")) %>% 
+  select(c("countrycode", "pop", "cgdpo", "csh_i")) -> pwt60
+pwt %>% 
+  filter(year == "1985") %>% 
+  select(c("countrycode","hc", "pop", "cgdpo", "csh_i")) -> pwt85
+pwt %>% 
+  filter(year == "2010") %>% 
+  select(c("countrycode", "hc", "pop", "cgdpo", "csh_i")) -> pwt10
+
+# Merge datasets together
+pwttemp <- left_join(pwt60, pwt85, by = "countrycode")
+pwttemp <- left_join(pwttemp, pwt10, by = "countrycode")
+
+#Subset only select countries in MRW
+pwtdata <- pwttemp[pwttemp$countrycode %in% countrycodes,]
+#Rename columns for convenience
+names(pwtdata) <- c("countrycode", "pop60", "cgdpo60", "csh_i60", "hc85", "pop85", "cgdpo85", "csh_i85", "hc10", "pop10", "cgdpo10", "csh_i10")
+
+#merge pwtdata and main data
+data <- left_join(data, pwtdata, by = "countrycode")
+
+
+#Select countries used in MRW from UNdata
+ UN <- UNdata[UNdata$`Country or Area` %in% countries,]
+
+#Notice only 89 observations, find missing countries, uncomment to see list  
+#setdiff(data$Country, UN$`Country or Area`)
+#Search for naming discrepancsh_ies, add names to countries list
+missingUNcountries <- c("Bolivia (Plurinational State of)", "Democratic Republic of the Congo", "Congo", "Cô´te d'Ivoire", "Egypt", "China Hong Kong SAR", "Republic of Korea", "United Republic of Tanzania", "United States of America", "Venezuela (Bolivarian Republic of)")
+countriesUN <- union(countries, missingUNcountries)
+UN <- UNdata[UNdata$`Country or Area` %in% countriesUN,]
+
+names(UN) <- c("Country", "Year", "Variant", "Value")
+UN <- spread(UN, Year, Value)
+
+#Rename countries in UNData so they can merge with main dataset
+UN[9,1] <- "Bolivia"
+UN[24, 1] <- "Congo, Dem. Rep."
+UN[22,1] <- "Congo, Rep."
+UN[20, 1] <- "Cote d'Ivoire"
+UN[28,1] <- "Egypt, Arab Rep."
+UN[19,1] <- "Hong Kong SAR, China"
+UN[73, 1] <- "Korea, Rep."
+UN[93, 1] <- "Tanzania"
+UN[94, 1] <- "United States"
+UN[96, 1] <- "Venezuela, RB"
+
+UN <- select(UN, -c("Variant"))
+names(UN) <- c("Country", "pop1519-85", "pop1519-10")
+
+data <- left_join(data, UN, by = "Country")
+
+#We have all non-oil countries, now add columns for intermediate and OECD
+mrw %>% 
+  filter(n == "1") %>% 
+  select(c("country", "i", "o")) -> mrw
+
+#Capitalize Country
+names(mrw) <- c("Country", "i", "O")
+
+#Find discrepancies in country names
+#uncomment to see names
+#setdiff(data$Country, mrw$Country)
+
+#Rename countries so they can properly merge
+mrw[8,1] = "Central African Republic"
+mrw[36,1] = "Congo, Dem. Rep."
+mrw[10, 1] = "Congo, Rep."
+mrw[14, 1] = "Cote d'Ivoire"
+mrw[74, 1] = "Dominican Republic"
+mrw[11, 1] = "Egypt, Arab Rep."
+mrw[60, 1] = "Germany"
+mrw[41, 1] = "Hong Kong SAR, China"
+mrw[46, 1] = "Korea, Rep."
+mrw[40, 1] = "Myanmar"
+mrw[30, 1] = "South Africa"
+mrw[53, 1] = "Syrian Arab Republic"
+mrw[94, 1] = "Venezuela, RB"
+
+#merge columns for Intermediate and OECD countries into the dataset
+data <- left_join(data, mrw, by = "Country")
+#MRW only select countries for which all data is available for, so exclude here countries that don't have educational data in 2010
+data <- data[complete.cases(data),]
+```
+
+```{r, include=FALSE}
+#Define variables as they will be used in regressions, then select only relevant variables. Repeat this 3 times for data for 
+data %>% 
+  mutate(WAP60 = (`1960WAP`/100 * pop60) *1000) %>% 
+  mutate(WAP85 = (`1985WAP`/100 * pop85) *1000) %>% 
+  mutate(WAP10 = (`2010WAP`/100 * pop10) *1000) %>% 
+  mutate(s1 = log(100 * (csh_i60 + csh_i85)/2)) %>% 
+  mutate(s2 = log(100 * (csh_i85+csh_i10)/2)) %>% 
+  mutate(st = log(100 * (csh_i60+csh_i10)/2)) %>% 
+  mutate(cgdpo60 = cgdpo60/WAP60) %>% 
+  mutate(cgdpo85 = cgdpo85/WAP85) %>% 
+  mutate(cgdpo10 = cgdpo10/WAP10) %>% 
+  mutate(n1 = ((WAP85 - WAP60)/WAP60)/25) %>% 
+  mutate(n2 = ((WAP10 - WAP85)/WAP85)/25) %>% 
+  mutate(nt = ((WAP10 - WAP60)/WAP60)/50) %>% 
+  mutate(ngd1 = log(n1 + .05)) %>% 
+  mutate(ngd2 = log(n2 + .05)) %>% 
+  mutate(ngdt = log(nt + .05)) %>% 
+  mutate(log60 = log(cgdpo60)) %>% 
+  mutate(log85 = log(cgdpo85)) %>% 
+  mutate(log10 = log(cgdpo10)) %>% 
+  mutate(school85 = log((GrossEnrollment85/100) * (`pop1519-85`/pop85))) %>% 
+  mutate(school10 = log((GrossEnrollment10/100) * (`pop1519-10`/pop10))) %>% 
+  mutate(sngd1 = s1 - ngd1) %>% 
+  mutate(sngd2 = s2 - ngd2) %>% 
+  mutate(sngdt = st - ngdt) %>% 
+  mutate(schoolngd1 = school85 - ngd1) %>% 
+  mutate(schoolngd2 = school10 - ngd2) %>% 
+  mutate(schoolngdt = school10 - ngdt) %>% 
+  mutate(hc_10 = log(hc10)) %>% 
+  mutate(hcngdt = hc_10 - ngdt) %>% 
+  select(c(1, 2, 24:47)) -> dfn
+
+data %>% 
+  filter(i == 1) %>% 
+  mutate(WAP60 = (`1960WAP`/100 * pop60) *1000) %>% 
+  mutate(WAP85 = (`1985WAP`/100 * pop85) *1000) %>% 
+  mutate(WAP10 = (`2010WAP`/100 * pop10) *1000) %>% 
+  mutate(s1 = log(100 * (csh_i60 + csh_i85)/2)) %>% 
+  mutate(s2 = log(100 * (csh_i85+csh_i10)/2)) %>% 
+  mutate(st = log(100 * (csh_i60+csh_i10)/2)) %>% 
+  mutate(cgdpo60 = cgdpo60/WAP60) %>% 
+  mutate(cgdpo85 = cgdpo85/WAP85) %>% 
+  mutate(cgdpo10 = cgdpo10/WAP10) %>% 
+  mutate(n1 = ((WAP85 - WAP60)/WAP60)/25) %>% 
+  mutate(n2 = ((WAP10 - WAP85)/WAP85)/25) %>% 
+  mutate(nt = ((WAP10 - WAP60)/WAP60)/50) %>% 
+  mutate(ngd1 = log(n1 + .05)) %>% 
+  mutate(ngd2 = log(n2 + .05)) %>% 
+  mutate(ngdt = log(nt + .05)) %>% 
+  mutate(log60 = log(cgdpo60)) %>% 
+  mutate(log85 = log(cgdpo85)) %>% 
+  mutate(log10 = log(cgdpo10)) %>% 
+  mutate(school85 = log((GrossEnrollment85/100) * (`pop1519-85`/pop85))) %>% 
+  mutate(school10 = log((GrossEnrollment10/100) * (`pop1519-10`/pop10))) %>% 
+  mutate(sngd1 = s1 - ngd1) %>% 
+  mutate(sngd2 = s2 - ngd2) %>% 
+  mutate(sngdt = st - ngdt) %>% 
+  mutate(schoolngd1 = school85 - ngd1) %>% 
+  mutate(schoolngd2 = school10 - ngd2) %>% 
+  mutate(schoolngdt = school10 - ngdt) %>% 
+  mutate(hc_10 = log(hc10)) %>% 
+  mutate(hcngdt = hc_10 - ngdt) %>% 
+  select(c(1, 2, 24:47)) -> dfi
+  
+data %>% 
+  filter(O == 1) %>% 
+   mutate(WAP60 = (`1960WAP`/100 * pop60) *1000) %>% 
+  mutate(WAP85 = (`1985WAP`/100 * pop85) *1000) %>% 
+  mutate(WAP10 = (`2010WAP`/100 * pop10) *1000) %>% 
+  mutate(s1 = log(100 * (csh_i60 + csh_i85)/2)) %>% 
+  mutate(s2 = log(100 * (csh_i85+csh_i10)/2)) %>% 
+  mutate(st = log(100 * (csh_i60+csh_i10)/2)) %>% 
+  mutate(cgdpo60 = cgdpo60/WAP60) %>% 
+  mutate(cgdpo85 = cgdpo85/WAP85) %>% 
+  mutate(cgdpo10 = cgdpo10/WAP10) %>% 
+  mutate(n1 = ((WAP85 - WAP60)/WAP60)/25) %>% 
+  mutate(n2 = ((WAP10 - WAP85)/WAP85)/25) %>% 
+  mutate(nt = ((WAP10 - WAP60)/WAP60)/50) %>% 
+  mutate(ngd1 = log(n1 + .05)) %>% 
+  mutate(ngd2 = log(n2 + .05)) %>% 
+  mutate(ngdt = log(nt + .05)) %>% 
+  mutate(log60 = log(cgdpo60)) %>% 
+  mutate(log85 = log(cgdpo85)) %>% 
+  mutate(log10 = log(cgdpo10)) %>% 
+  mutate(school85 = log((GrossEnrollment85/100) * (`pop1519-85`/pop85))) %>% 
+  mutate(school10 = log((GrossEnrollment10/100) * (`pop1519-10`/pop10))) %>% 
+  mutate(sngd1 = s1 - ngd1) %>% 
+  mutate(sngd2 = s2 - ngd2) %>% 
+  mutate(sngdt = st - ngdt) %>% 
+  mutate(schoolngd1 = school85 - ngd1) %>% 
+  mutate(schoolngd2 = school10 - ngd2) %>% 
+  mutate(schoolngdt = school10 - ngdt) %>% 
+  mutate(hc_10 = log(hc10)) %>% 
+  mutate(hcngdt = hc_10 - ngdt) %>% 
+  select(c(1, 2, 24:47)) -> dfO
+
+```
+
+
+```{r, include=FALSE}
+#Model suffixes are relevant end year of 25 year period or 50 for 1960-2010, T or A for textbook or augmented model, and n, i or O for non-oil, intermediate or OECD countries
+model85Tn <- lm(log85 ~ s1 + ngd1, dfn)
+model10Tn <- lm(log10 ~ s2 + ngd2, dfn)
+model50Tn <- lm(log10 ~ st + ngdt, dfn)
+modeltest85Tn <- lm(log85 ~ sngd1, dfn)
+modeltest10Tn <- lm(log10 ~ sngd2, dfn)
+modeltest50Tn <- lm(log10 ~ sngdt, dfn)
+model85An <- lm(log85 ~ s1 + ngd1 + school85, dfn)
+model10An <- lm(log10 ~ s2 + ngd2 + school10, dfn)
+model50An <- lm(log10 ~ st + ngdt + school10 , dfn)
+modeltest85An <- lm(log85 ~ sngd1 + schoolngd1, dfn)
+modeltest10An <- lm(log10 ~ sngd2 + schoolngd2, dfn)
+modeltest50An <- lm(log10 ~ sngdt + schoolngdt, dfn)
+model85Ti <- lm(log85 ~ s1 + ngd1, dfi)
+model10Ti <- lm(log10 ~ s2 + ngd2, dfi)
+model85Ai <- lm(log85 ~ s1 + ngd1 + school85, dfi)
+model10Ai <- lm(log10 ~ s2 + ngd2 + school10, dfi)
+model50Ti <- lm(log10 ~ st + ngdt, dfi)
+model50Ai <- lm(log10 ~ st + ngdt + school10 , dfi)
+modeltest85Ti <- lm(log85 ~ sngd1, dfi)
+modeltest10Ti <- lm(log10 ~ sngd2, dfi)
+modeltest50Ti <- lm(log10 ~ sngdt, dfi)
+modeltest85Ai <- lm(log85 ~ sngd1 + schoolngd1, dfi)
+modeltest10Ai <- lm(log10 ~ sngd2 + schoolngd2, dfi)
+modeltest50Ai <- lm(log10 ~ sngdt + schoolngdt, dfi)
+model85To <- lm(log85 ~ s1 + ngd1, dfO)
+model10To <- lm(log10 ~ s2 + ngd2, dfO)
+model50To <- lm(log10 ~ st + ngdt, dfO)
+model85Ao <- lm(log85 ~ s1 + ngd1 + school85, dfO)
+model10Ao <- lm(log10 ~ s2 + ngd2 + school10, dfO)
+model50Ao <- lm(log10 ~ st + ngdt + school10 , dfO)
+modeltest85To <- lm(log85 ~ sngd1, dfO)
+modeltest10To <- lm(log10 ~ sngd2, dfO)
+modeltest50To <- lm(log10 ~ sngdt, dfO)
+modeltest85Ao <- lm(log85 ~ sngd1 + schoolngd1, dfO)
+modeltest10Ao <- lm(log10 ~ sngd2 + schoolngd2, dfO)
+modeltest50Ao <- lm(log10 ~ sngdt + schoolngdt, dfO)
+```
+
+```{r, echo = FALSE}
+alphatextbook <- function(model) {
+  model$coefficients[2]/(1+model$coefficients[2])
+}
+
+alphaaugment <- function(model) {
+  model$coefficients[2]/(1+model$coefficients[2] + model$coefficients[3])
+}
+
+betafunc <- function(model) {
+    model$coefficients[3]/(1+model$coefficients[2] + model$coefficients[3])
+}
+```
+
+#Textbook Solow Model, 1960-1985
+```{r, echo = FALSE}
+MRWtabletextbook <- function(model1, model2, model3, model4, model5, model6) {
+  a <- c(nobs(model1), nobs(model2), nobs(model3))
+  b <- c(model1$coefficients[1], model2$coefficients[1], model3$coefficients[1])
+  c <- c(coef(summary(model1))[1, 2], coef(summary(model2))[1, 2], coef(summary(model3))[1, 2])
+  d <- c(coef(summary(model1))[1, 4], coef(summary(model2))[1, 4], coef(summary(model3))[1, 4])
+  e <- c(model1$coefficients[2], model2$coefficients[2], model3$coefficients[2])
+  f <- c(coef(summary(model1))[2, 2], coef(summary(model2))[2, 2], coef(summary(model3))[2, 2])
+  g <- c(coef(summary(model1))[2, 4], coef(summary(model2))[2, 4], coef(summary(model3))[2, 4])
+  h <- c(model1$coefficients[3], model2$coefficients[3], model3$coefficients[3])
+  i <- c(coef(summary(model1))[3, 2], coef(summary(model2))[3, 2], coef(summary(model3))[3, 2])
+  j <- c(coef(summary(model1))[3, 4], coef(summary(model2))[3, 4], coef(summary(model3))[3, 4])
+  k <- c(summary(model1)$adj.r.squared, summary(model2)$adj.r.squared, summary(model3)$adj.r.squared)
+  l <- c(summary(model1)$sigma, summary(model2)$sigma, summary(model3)$sigma)
+  m <- c(NA, NA, NA)
+  n <- c(model4$coefficients[1], model5$coefficients[1], model6$coefficients[1])
+  o <- c(coef(summary(model4))[2], coef(summary(model5))[2], coef(summary(model6))[2])
+  p <- c(coef(summary(model4))[1, 4], coef(summary(model5))[1, 4], coef(summary(model6))[1, 4])
+  q <- c(model4$coefficients[2], model5$coefficients[2], model6$coefficients[2])
+  r <- c(coef(summary(model4))[2, 2], coef(summary(model5))[2, 2], coef(summary(model3))[2, 2])
+  s <- c(coef(summary(model4))[2, 4], coef(summary(model5))[2, 4], coef(summary(model6))[2, 4])
+  t <- c(summary(model4)$adj.r.squared, summary(model5)$adj.r.squared, summary(model6)$adj.r.squared)
+  u <- c(summary(model4)$sigma, summary(model5)$sigma, summary(model6)$sigma)
+  v <- c(NA, NA, NA)
+  w <- c(anova(model1, model4)[2,6], anova(model2, model5)[2,6], anova(model3, model6)[2,6])
+  x <- c(alphatextbook(model4), alphatextbook(model5), alphatextbook(model6))
+  table <- data.frame(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p, q,r,s,t,u,v, w, x)
+  table[is.na(table)] = "" 
+  table[1:3, 2:12] <- round(table[1:3, 2:12], 3)
+  table[1:3, 14:21] <- round(table[1:3, 14:21], 3)
+  table[1:3, 23:24] <- round(table[1:3, 23:24], 3)
+  row.names(table) <- c("Non-Oil", "Intermediate", "OECD")
+  table <- t(table)
+  row.names(table) <- c("Observations", "Intercept", "se", "p", "ln(I/GDP)", "se", "p", "ln(n + g + δ)", "se", "p", "Adjusted R Squared", "see", "Restricted Regression:", "Constant", "se", "p", "ln(I/GDP) - ln(n+g+δ)", "se", "p", "Adjusted R Squared", "see", "Test of Restriction:", "p", "Implied alpha")
+  print(table)
+}
+
+Table1 <- MRWtabletextbook(model85Tn, model85Ti, model85To, modeltest85Tn, modeltest85Ti, modeltest85To)
+```
+
+#Textbook Solow Model, 1985-2010
+```{r, echo = FALSE}
+table2 <- MRWtabletextbook(model10Tn, model10Ti, model10To, modeltest10Tn, modeltest10Ti, modeltest10To)
+```
+#Textbook Solow Model, 1960-2010
+```{r, echo = FALSE}
+table3 <- MRWtabletextbook(model50Tn, model50Ti, model50To, modeltest50Tn,modeltest50Ti, modeltest50To)
+```
+
+
+#Augmented Solow Model, 1960-1985
+```{r, echo = FALSE}
+MRWtablaugment <- function(model1, model2, model3, model4, model5, model6) {
+  a <- c(nobs(model1), nobs(model2), nobs(model3))
+  b <- c(model1$coefficients[1], model2$coefficients[1], model3$coefficients[1])
+  c <- c(coef(summary(model1))[1, 2], coef(summary(model2))[1, 2], coef(summary(model3))[1, 2])
+  d <- c(coef(summary(model1))[1, 4], coef(summary(model2))[1, 4], coef(summary(model3))[1, 4])
+  e <- c(model1$coefficients[2], model2$coefficients[2], model3$coefficients[2])
+  f <- c(coef(summary(model1))[2, 2], coef(summary(model2))[2, 2], coef(summary(model3))[2, 2])
+  g <- c(coef(summary(model1))[2, 4], coef(summary(model2))[2, 4], coef(summary(model3))[2, 4])
+  h <- c(model1$coefficients[3], model2$coefficients[3], model3$coefficients[3])
+  i <- c(coef(summary(model1))[3, 2], coef(summary(model2))[3, 2], coef(summary(model3))[3, 2])
+  j <- c(coef(summary(model1))[3, 4], coef(summary(model2))[3, 4], coef(summary(model3))[3, 4])
+  k <- c(model1$coefficients[4], model2$coefficients[4], model3$coefficients[3])
+  l <- c(coef(summary(model1))[4, 2], coef(summary(model2))[4, 2], coef(summary(model3))[4, 2])
+  m <- c(coef(summary(model1))[4, 4], coef(summary(model2))[4, 4], coef(summary(model3))[4, 4])
+  n <- c(summary(model1)$adj.r.squared, summary(model2)$adj.r.squared, summary(model3)$adj.r.squared)
+  o <- c(summary(model1)$sigma, summary(model2)$sigma, summary(model3)$sigma)
+  p <- c(NA, NA, NA)
+  q <- c(model4$coefficients[1], model5$coefficients[1], model6$coefficients[1])
+  r <- c(coef(summary(model4))[2], coef(summary(model5))[2], coef(summary(model6))[2])
+  s <- c(coef(summary(model4))[1, 4], coef(summary(model5))[1, 4], coef(summary(model6))[1, 4])
+  t <- c(model4$coefficients[2], model5$coefficients[2], model6$coefficients[2])
+  u <- c(coef(summary(model4))[2, 2], coef(summary(model5))[2, 2], coef(summary(model3))[2, 2])
+  v <- c(coef(summary(model4))[2, 4], coef(summary(model5))[2, 4], coef(summary(model6))[2, 4])
+  w <- c(model4$coefficients[3], model5$coefficients[3], model6$coefficients[3])
+  x <- c(coef(summary(model4))[3, 2], coef(summary(model5))[3, 2], coef(summary(model3))[3, 2])
+  y <- c(coef(summary(model4))[3, 4], coef(summary(model5))[3, 4], coef(summary(model6))[3, 4])
+  z <- c(summary(model4)$adj.r.squared, summary(model5)$adj.r.squared, summary(model6)$adj.r.squared)
+  aa <- c(summary(model4)$sigma, summary(model5)$sigma, summary(model6)$sigma)
+  ab <- c(NA, NA, NA)
+  ac <- c(anova(model1, model4)[2,6], anova(model2, model5)[2,6], anova(model3, model6)[2,6])
+  ad <- c(alphaaugment(model4), alphaaugment(model5), alphaaugment(model6))
+  ae <- c(betafunc(model4), betafunc(model5), betafunc(model6))
+  table <- data.frame(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p, q,r,s,t,u,v, w, x, y, z, aa, ab, ac, ad, ae)
+  table[is.na(table)] = "" 
+  row.names(table) <- c("Non-Oil", "Intermediate", "OECD")
+  table[1:3, 2:15] <- round(table[1:3, 2:15], 2)
+  table[1:3, 17:27] <- round(table[1:3, 17:27], 2)
+  table[1:3, 29:31] <- round(table[1:3, 29:31], 2)
+  table <- t(table)
+  row.names(table) <- c("Observations", "Intercept", "se", "p", "ln(I/GDP)", "se", "p", "ln(n + g + δ)", "se", "p","ln(School)", "se", "p", "Adjusted R Squared", "s.e.e", "Restricted Regression:", "Intercept", "se", "p", "ln(I/GDP) - ln(n+g+δ)", "se", "p","ln(School) - ln(n+g+d)", "se", "p",  "Adjusted R Squared", "s.e.e", "Test of Restriction:", "p", "Implied α", "Implied b")
+  print(table)
+}
+
+table4 <- MRWtablaugment(model85An, model85Ai, model85Ao, modeltest85An, modeltest85Ai, modeltest85Ao)
+```
+
+#Augmented Solow Model, 1985-2010
+```{r, echo = FALSE}
+table5 <- MRWtablaugment(model10An, model10Ai, model10Ao, modeltest10An, modeltest10Ai, modeltest10Ao)
+
+```
+#Augmented Solow Model, 1960-2010
+```{r, echo=FALSE}
+table6 <- MRWtablaugment(model50An, model50Ai, model50Ao, modeltest50An, modeltest50Ai, modeltest50Ao)
+
+
+```
+#Descriptive Statistics of dependent and independent variables
+```{r, echo = FALSE}
+stat.desc(select(dfi, c("log10", "st", "ngdt", "school10")))
+```
+#Summary of Augmented Model, 1960-2010, Intermediate countries
+```{r, echo=FALSE}
+summary(model50Ai)
+```
+#Ramsey Reset test
+```{r, echo = FALSE}
+resettest(model50Ai, 2:4)
+```
+#VIFs 
+```{r, echo = FALSE}
+vif(model50Ai)
+```
+#Breusch-Pagan test
+```{r, echo = FALSE}
+bptest(model50Ai)
+```
+#Summary of model with human capital replacing SCHOOL
+```{r, echo= FALSE}
+model50iHC <- lm(log10 ~ st + ngdt + hc_10, dfi)
+model50nHC <- lm(log10 ~ st + ngdt + hc_10, dfn)
+model50oHC <- lm(log10 ~ st + ngdt + hc_10, dfO)
+modeltest50iHC <- lm(log10 ~ sngdt + hcngdt, dfi)
+modeltest50nHC <- lm(log10 ~ sngdt + hcngdt, dfn)
+modeltest50oHC <- lm(log10 ~ sngdt + hcngdt, dfO)
+summary(model50iHC)
+```
+#Table of model with human capital index replacing SCHOOL
+```{r, echo = FALSE}
+MRWtablaugment(model50nHC, model50iHC, model50oHC, modeltest50nHC, modeltest50iHC, modeltest50oHC)
+
+```
+#Simple Correlation between income per capita in 2010 and human capital
+```{r, echo = FALSE}
+cor(dfi$hc_10, dfi$log10)
+```
